@@ -42,7 +42,7 @@ async function dbDelete(id) {
 }
 
 // ── Gemini API ────────────────────────────────────────────────────────────
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.REACT_APP_GEMINI_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.REACT_APP_GEMINI_KEY}`;
 
 async function analyzeClothingItem(imageBase64) {
   const res = await fetch(GEMINI_URL, {
