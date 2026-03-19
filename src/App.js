@@ -3,21 +3,16 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const CATEGORIES = ["Todos", "Tops", "Bottoms", "Vestidos", "Abrigos", "Zapatos", "Accesorios", "Otro"];
 const CAT_EMOJI = { Todos: "✦", Tops: "👕", Bottoms: "👖", Vestidos: "👗", Abrigos: "🧥", Zapatos: "👟", Accesorios: "👜", Otro: "✨" };
 
-// ── IndexedDB storage (works on mobile browsers) ──────────────────────────
+// ── IndexedDB storage ─────────────────────────────────────────────────────
 const DB_NAME = "mi-closet-db";
-const DB_VERSION = 1;
-
 function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore("items", { keyPath: "id" });
-    };
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = (e) => e.target.result.createObjectStore("items", { keyPath: "id" });
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror = () => reject(req.error);
   });
 }
-
 async function dbGetAll() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -27,7 +22,6 @@ async function dbGetAll() {
     req.onerror = () => reject(req.error);
   });
 }
-
 async function dbPut(item) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -37,7 +31,6 @@ async function dbPut(item) {
     tx.onerror = () => reject(tx.error);
   });
 }
-
 async function dbDelete(id) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -48,74 +41,51 @@ async function dbDelete(id) {
   });
 }
 
-// ── Anthropic API calls ───────────────────────────────────────────────────
+// ── Gemini API ────────────────────────────────────────────────────────────
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.REACT_APP_GEMINI_KEY}`;
+
 async function analyzeClothingItem(imageBase64) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(GEMINI_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 500,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
-            {
-              type: "text",
-              text: `Analiza esta prenda de ropa y devuelve SOLO un JSON válido sin markdown ni backticks:\n{"name":"nombre descriptivo","category":"Tops|Bottoms|Vestidos|Abrigos|Zapatos|Accesorios|Otro","color":"color principal","style":"casual|formal|deportivo|elegante|urbano|bohemio","season":"Primavera/Verano|Otoño/Invierno|Todo el año","description":"descripción de 15 palabras max"}`,
-            },
-          ],
-        },
-      ],
-    }),
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: "image/jpeg", data: imageBase64 } },
+          { text: `Analiza esta prenda de ropa y devuelve SOLO un JSON válido sin markdown ni backticks:\n{"name":"nombre descriptivo en español","category":"uno de exactamente: Tops|Bottoms|Vestidos|Abrigos|Zapatos|Accesorios|Otro","color":"color(es) principal(es)","style":"casual|formal|deportivo|elegante|urbano|bohemio","season":"Primavera/Verano|Otoño/Invierno|Todo el año","description":"descripción corta máximo 15 palabras"}` }
+        ]
+      }],
+      generationConfig: { temperature: 0.1, maxOutputTokens: 300 }
+    })
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const text = data.content[0].text.replace(/```json|```/g, "").trim();
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("No se pudo leer la respuesta");
-  }
+  const text = data.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(text); }
+  catch { const m = text.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); throw new Error("No se pudo leer la respuesta"); }
 }
 
 async function getOutfitRecommendations(items) {
-  const content = [];
+  const parts = [];
   items.slice(0, 10).forEach((item, i) => {
-    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: item.imageData } });
-    content.push({ type: "text", text: `[${i + 1}] ${item.name} — ${item.category}, ${item.color}, ${item.style}` });
+    parts.push({ inline_data: { mime_type: "image/jpeg", data: item.imageData } });
+    parts.push({ text: `[${i + 1}] ${item.name} — ${item.category}, ${item.color}, ${item.style}` });
   });
-  content.push({
-    type: "text",
-    text: `Crea 3 outfits con estas prendas. SOLO JSON sin markdown:\n{"outfits":[{"nombre":"nombre creativo","ocasion":"ocasión","prendas":[1,2,3],"descripcion":"por qué funciona (15 palabras)","tip":"consejo de estilo"}]}`,
-  });
+  parts.push({ text: `Con estas prendas crea 3 outfits. SOLO JSON sin markdown:\n{"outfits":[{"nombre":"nombre creativo","ocasion":"para qué ocasión","prendas":[1,2,3],"descripcion":"por qué funciona este look en 15 palabras","tip":"consejo de estilo corto"}]}` });
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(GEMINI_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content }] }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 800 }
+    })
   });
-  if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
   const data = await res.json();
-  const text = data.content[0].text.replace(/```json|```/g, "").trim();
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error("No se pudo leer los outfits");
-  }
+  const text = data.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(text); }
+  catch { const m = text.match(/\{[\s\S]*\}/); if (m) return JSON.parse(m[0]); throw new Error("No se pudo leer los outfits"); }
 }
 
 // ── Image compression ─────────────────────────────────────────────────────
@@ -143,7 +113,6 @@ function catColor(cat) {
   return map[cat] || "#2a2a2a";
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;600&family=Jost:wght@300;400;500;600&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -175,7 +144,6 @@ const css = `
   ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
 `;
 
-// ── Main component ────────────────────────────────────────────────────────
 export default function VirtualCloset() {
   const [items, setItems] = useState([]);
   const [tab, setTab] = useState("closet");
@@ -198,10 +166,8 @@ export default function VirtualCloset() {
 
   async function handleFiles(files) {
     if (!files.length || uploading) return;
-    setUploading(true);
-    setUploadError("");
+    setUploading(true); setUploadError("");
     const added = [];
-
     for (let i = 0; i < files.length; i++) {
       if (!files[i].type.startsWith("image/")) continue;
       setProgress(`Analizando prenda ${i + 1} de ${files.length}...`);
@@ -212,14 +178,9 @@ export default function VirtualCloset() {
         await dbPut(item);
         added.push(item);
         setItems((p) => [...p, item]);
-      } catch (e) {
-        console.error(e);
-        setUploadError(`Error: ${e.message}`);
-      }
+      } catch (e) { console.error(e); setUploadError(`Error: ${e.message}`); }
     }
-
-    setUploading(false);
-    setProgress("");
+    setUploading(false); setProgress("");
     if (added.length) { setUploadError(""); setTab("closet"); }
   }
 
@@ -234,11 +195,8 @@ export default function VirtualCloset() {
     setLoadingOutfits(true); setOutfits([]); setOutfitDone(false); setOutfitError("");
     try {
       const r = await getOutfitRecommendations(items);
-      setOutfits(r.outfits || []);
-      setOutfitDone(true);
-    } catch (e) {
-      setOutfitError("Error: " + e.message);
-    }
+      setOutfits(r.outfits || []); setOutfitDone(true);
+    } catch (e) { setOutfitError("Error: " + e.message); }
     setLoadingOutfits(false);
   }
 
@@ -252,7 +210,6 @@ export default function VirtualCloset() {
     <div className="vc-root">
       <style>{css}</style>
 
-      {/* Header */}
       <header style={{ borderBottom: "1px solid #1a1a1a", position: "sticky", top: 0, zIndex: 100, background: "rgba(13,13,13,0.97)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px 10px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -280,7 +237,7 @@ export default function VirtualCloset() {
 
       <main style={{ maxWidth: 700, margin: "0 auto", padding: "20px 14px", paddingBottom: 40 }}>
 
-        {/* ── CLOSET ── */}
+        {/* CLOSET */}
         {tab === "closet" && (
           <div className="fade-in">
             <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 10, marginBottom: 18 }}>
@@ -295,12 +252,8 @@ export default function VirtualCloset() {
             ) : filtered.length === 0 ? (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "55vh", gap: 10, textAlign: "center" }}>
                 <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 44, color: "#222" }}>✦</div>
-                <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 22, color: "#444" }}>
-                  {items.length === 0 ? "Tu closet está vacío" : "Sin prendas aquí"}
-                </div>
-                <div style={{ fontSize: 12, color: "#444" }}>
-                  {items.length === 0 ? "Agrega fotos de tu ropa para comenzar" : "Prueba otra categoría"}
-                </div>
+                <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 22, color: "#444" }}>{items.length === 0 ? "Tu closet está vacío" : "Sin prendas aquí"}</div>
+                <div style={{ fontSize: 12, color: "#444" }}>{items.length === 0 ? "Agrega fotos de tu ropa para comenzar" : "Prueba otra categoría"}</div>
                 {items.length === 0 && <button className="empty-btn" onClick={() => setTab("upload")}>Agregar ropa →</button>}
               </div>
             ) : (
@@ -326,14 +279,13 @@ export default function VirtualCloset() {
           </div>
         )}
 
-        {/* ── UPLOAD ── */}
+        {/* UPLOAD */}
         {tab === "upload" && (
           <div className="fade-in" style={{ maxWidth: 500, margin: "0 auto" }}>
             <div style={{ textAlign: "center", marginBottom: 24 }}>
               <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 28, fontWeight: 300, marginBottom: 8 }}>Agrega tus prendas</div>
               <div style={{ fontSize: 12, color: "#555", lineHeight: 1.7 }}>Sube fotos y la IA las clasificará automáticamente.</div>
             </div>
-
             <div className="dropzone-area"
               style={{ border: `1px dashed ${dragging ? "#c9a84c" : "#2a2a2a"}`, borderRadius: 14, minHeight: 220, display: "flex", alignItems: "center", justifyContent: "center", background: dragging ? "rgba(201,168,76,0.06)" : "#0a0a0a" }}
               onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -342,7 +294,6 @@ export default function VirtualCloset() {
               onClick={() => !uploading && fileRef.current.click()}>
               <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
                 onChange={(e) => handleFiles(Array.from(e.target.files))} />
-
               {uploading ? (
                 <div style={{ textAlign: "center", padding: 36, display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
                   <div className="spinner" style={{ width: 40, height: 40, borderWidth: 3 }} />
@@ -357,12 +308,11 @@ export default function VirtualCloset() {
                 </div>
               )}
             </div>
-
             {uploadError && <div className="error-box">⚠️ {uploadError}</div>}
           </div>
         )}
 
-        {/* ── OUTFITS ── */}
+        {/* OUTFITS */}
         {tab === "outfits" && (
           <div className="fade-in">
             <div style={{ textAlign: "center", marginBottom: 28 }}>
@@ -373,14 +323,12 @@ export default function VirtualCloset() {
               </button>
               {outfitError && <div className="error-box" style={{ textAlign: "left", marginTop: 14 }}>⚠️ {outfitError}</div>}
             </div>
-
             {loadingOutfits && (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 48, gap: 14 }}>
                 <div className="spinner" style={{ width: 44, height: 44, borderWidth: 3 }} />
                 <div style={{ fontSize: 12, color: "#555" }}>Analizando tu closet...</div>
               </div>
             )}
-
             {outfits.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 {outfits.map((outfit, oi) => {
@@ -413,7 +361,6 @@ export default function VirtualCloset() {
                 })}
               </div>
             )}
-
             {!loadingOutfits && outfits.length === 0 && !outfitDone && items.length >= 2 && (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 48, gap: 10, textAlign: "center" }}>
                 <div className="pulse" style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 44, color: "#222" }}>✦</div>
@@ -425,32 +372,30 @@ export default function VirtualCloset() {
         )}
       </main>
 
-      {/* ── MODAL ── */}
+      {/* MODAL */}
       {selected && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.9)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 0 }}
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.9)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
           onClick={() => setSelected(null)}>
-          <div className="modal-in" style={{ background: "#0f0f0f", border: "1px solid #1e1e1e", borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 500, maxHeight: "85vh", overflow: "hidden", position: "relative", display: "flex", flexDirection: "column" }}
+          <div className="modal-in" style={{ background: "#0f0f0f", border: "1px solid #1e1e1e", borderRadius: "20px 20px 0 0", width: "100%", maxWidth: 500, maxHeight: "85vh", overflow: "hidden", position: "relative", display: "flex" }}
             onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setSelected(null)}>✕</button>
-            <div style={{ display: "flex", overflow: "auto" }}>
-              <div style={{ width: 160, flexShrink: 0 }}>
-                <img src={`data:image/jpeg;base64,${selected.imageData}`} alt={selected.name}
-                  style={{ width: "100%", height: "100%", minHeight: 200, objectFit: "cover", display: "block" }} />
+            <div style={{ width: 160, flexShrink: 0 }}>
+              <img src={`data:image/jpeg;base64,${selected.imageData}`} alt={selected.name}
+                style={{ width: "100%", height: "100%", minHeight: 200, objectFit: "cover", display: "block" }} />
+            </div>
+            <div style={{ padding: "22px 18px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 9 }}>
+              <div style={{ fontSize: 9, color: "#c9a84c", letterSpacing: "0.2em", textTransform: "uppercase" }}>{CAT_EMOJI[selected.category]} {selected.category}</div>
+              <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 20, lineHeight: 1.2 }}>{selected.name}</div>
+              <p style={{ fontSize: 11, color: "#555", lineHeight: 1.6 }}>{selected.description}</p>
+              <div style={{ borderTop: "1px solid #1a1a1a", paddingTop: 10, display: "flex", flexDirection: "column", gap: 7 }}>
+                {[["Color", selected.color], ["Estilo", selected.style], ["Temporada", selected.season]].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 9, color: "#444", letterSpacing: "0.12em", textTransform: "uppercase" }}>{k}</span>
+                    <span style={{ fontSize: 11, color: "#888" }}>{v}</span>
+                  </div>
+                ))}
               </div>
-              <div style={{ padding: "22px 18px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 9 }}>
-                <div style={{ fontSize: 9, color: "#c9a84c", letterSpacing: "0.2em", textTransform: "uppercase" }}>{CAT_EMOJI[selected.category]} {selected.category}</div>
-                <div style={{ fontFamily: "'Cormorant Garamond', serif", fontSize: 20, lineHeight: 1.2 }}>{selected.name}</div>
-                <p style={{ fontSize: 11, color: "#555", lineHeight: 1.6 }}>{selected.description}</p>
-                <div style={{ borderTop: "1px solid #1a1a1a", paddingTop: 10, display: "flex", flexDirection: "column", gap: 7 }}>
-                  {[["Color", selected.color], ["Estilo", selected.style], ["Temporada", selected.season]].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: 9, color: "#444", letterSpacing: "0.12em", textTransform: "uppercase" }}>{k}</span>
-                      <span style={{ fontSize: 11, color: "#888" }}>{v}</span>
-                    </div>
-                  ))}
-                </div>
-                <button className="delete-btn" onClick={() => deleteItem(selected.id)}>Eliminar prenda</button>
-              </div>
+              <button className="delete-btn" onClick={() => deleteItem(selected.id)}>Eliminar prenda</button>
             </div>
           </div>
         </div>
